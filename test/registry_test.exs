@@ -836,6 +836,31 @@ defmodule RegistryTest do
       assert %{} == processes(reg2)
       assert [] = Horde.Registry.lookup(reg2, "key")
     end
+
+    test "a key registered by a removed member is restored when the member rejoins" do
+      reg1 = start_registry()
+      reg2 = start_registry()
+      self = self()
+
+      Horde.Cluster.set_members(reg1, [reg1, reg2])
+      Horde.Cluster.set_members(reg2, [reg1, reg2])
+      Process.sleep(200)
+
+      {:ok, _} = Horde.Registry.register(reg1, "key", :value)
+      Process.sleep(200)
+      assert [{^self, :value}] = Horde.Registry.lookup(reg2, "key")
+      assert [{^self, :value}] = Horde.Registry.lookup(reg1, "key")
+
+      Horde.Cluster.set_members(reg2, [reg2])
+      Process.sleep(200)
+      assert [] = Horde.Registry.lookup(reg2, "key")
+
+      Horde.Cluster.set_members(reg1, [reg1, reg2])
+      Horde.Cluster.set_members(reg2, [reg1, reg2])
+      Process.sleep(200)
+
+      assert [{^self, :value}] = Horde.Registry.lookup(reg2, "key")
+    end
   end
 
   describe "listeners" do
