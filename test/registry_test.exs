@@ -836,6 +836,77 @@ defmodule RegistryTest do
       assert %{} == processes(reg2)
       assert [] = Horde.Registry.lookup(reg2, "key")
     end
+
+    test "a key registered by a removed member is restored when the member rejoins" do
+      reg1 = start_registry()
+      reg2 = start_registry()
+      self = self()
+
+      Horde.Cluster.set_members(reg1, [reg1, reg2])
+      Horde.Cluster.set_members(reg2, [reg1, reg2])
+      Process.sleep(200)
+
+      {:ok, _} = Horde.Registry.register(reg1, "key", :value)
+      Process.sleep(200)
+      assert [{^self, :value}] = Horde.Registry.lookup(reg2, "key")
+      assert [{^self, :value}] = Horde.Registry.lookup(reg1, "key")
+
+      Horde.Cluster.set_members(reg2, [reg2])
+      Process.sleep(200)
+      assert [] = Horde.Registry.lookup(reg2, "key")
+
+      Horde.Cluster.set_members(reg1, [reg1, reg2])
+      Horde.Cluster.set_members(reg2, [reg1, reg2])
+      Process.sleep(200)
+
+      assert [{^self, :value}] = Horde.Registry.lookup(reg2, "key")
+    end
+
+    test "a name is taken over by a new registry when the original member is gone" do
+      reg_a = start_registry()
+      reg_b = start_registry()
+
+      Horde.Cluster.set_members(reg_a, [reg_a, reg_b])
+      Horde.Cluster.set_members(reg_b, [reg_a, reg_b])
+      Process.sleep(100)
+
+      p1 = start_registered_process(reg_a, "key", :value)
+      Process.sleep(100)
+      assert [{^p1, :value}] = Horde.Registry.lookup(reg_b, "key")
+
+      # A is evicted by its peer; its registration is hidden but the process lives
+      Horde.Cluster.set_members(reg_b, [reg_b])
+      Process.sleep(100)
+      assert [] = Horde.Registry.lookup(reg_b, "key")
+      assert Process.alive?(p1)
+
+      # C registers the same name, then joins the cluster
+      reg_c = start_registry()
+      p2 = start_registered_process(reg_c, "key", :value)
+      Process.sleep(100)
+      assert [{^p2, :value}] = Horde.Registry.lookup(reg_c, "key")
+
+      Horde.Cluster.set_members(reg_b, [reg_b, reg_c])
+      Horde.Cluster.set_members(reg_c, [reg_b, reg_c])
+      Process.sleep(200)
+
+      # the conflict is resolved: the cluster agrees on C's entry, p1 is gone
+      assert [{^p2, :value}] = Horde.Registry.lookup(reg_b, "key")
+      refute Process.alive?(p1)
+      assert Process.alive?(p2)
+
+      # A rejoins; all registries agree on a single valid entry
+      Horde.Cluster.set_members(reg_a, [reg_a, reg_b, reg_c])
+      Horde.Cluster.set_members(reg_b, [reg_a, reg_b, reg_c])
+      Horde.Cluster.set_members(reg_c, [reg_a, reg_b, reg_c])
+      Process.sleep(300)
+
+      assert %{"key" => {^p2, :value}} = processes(reg_a)
+      assert %{"key" => {^p2, :value}} = processes(reg_b)
+      assert %{"key" => {^p2, :value}} = processes(reg_c)
+      refute Process.alive?(p1)
+      assert Process.alive?(p2)
+    end
   end
 
   describe "listeners" do
@@ -931,6 +1002,20 @@ defmodule RegistryTest do
 
     assert_receive {:ok, owner}
     {owner, task}
+  end
+
+  defp start_registered_process(registry, key, value) do
+    parent = self()
+
+    pid =
+      spawn(fn ->
+        Horde.Registry.register(registry, key, value)
+        send(parent, {:registered, self()})
+        Process.sleep(:infinity)
+      end)
+
+    assert_receive {:registered, ^pid}
+    pid
   end
 
   defp start_registry(opts \\ [keys: :unique]) do

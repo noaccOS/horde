@@ -196,18 +196,6 @@ defmodule Horde.RegistryImpl do
   defp process_diff(state, {:remove, {:member, member}}) do
     :ets.match_delete(state.members_ets_table, {member, 1})
 
-    removed_keys = :ets.match(state.keys_ets_table, {:"$1", member, {:"$2", :_}})
-
-    DeltaCrdt.drop(
-      crdt_name(state.name),
-      Enum.map(removed_keys, fn [key, _pid] -> {:key, key} end),
-      :infinity
-    )
-
-    Enum.each(removed_keys, fn [key, pid] ->
-      unregister_local(state, key, pid)
-    end)
-
     new_members = MapSet.delete(state.members, member)
     new_nodes = Enum.map(new_members, fn {_name, node} -> node end) |> MapSet.new()
 
