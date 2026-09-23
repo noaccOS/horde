@@ -211,25 +211,42 @@ defmodule Horde.RegistryImpl do
   defp process_diff(state, {:add, {:key, key}, {member, pid, value}}) do
     link_local_pid(pid)
 
-    add_key_to_pids_table(state, pid, key)
+    case :ets.lookup(state.keys_ets_table, key) do
+      [{^key, _member, {other_pid, other_value}}] when other_pid != pid ->
+        resolve_key_conflict(state, key, member, pid, value, other_pid, other_value)
 
-    with [{^key, _member, {other_pid, other_value}}] when other_pid != pid <-
-           :ets.lookup(state.keys_ets_table, key) do
-      # There was a conflict in the name registry, send the  losing PID
-      # an exit signal indicating it has lost the name registration.
-
-      unregister_local(state, key, other_pid)
-
-      Process.exit(other_pid, {:name_conflict, {key, other_value}, state.name, pid})
+      _ ->
+        insert_key(state, key, member, pid, value)
     end
-
-    :ets.insert(state.keys_ets_table, {key, member, {pid, value}})
 
     for listener <- state.listeners do
       send(listener, {:register, state.name, key, pid, value})
     end
 
     state
+  end
+
+  # Two processes claim the same key. Dead entries never evict a live holder;
+  # a live process takes over from a dead holder silently; only a genuine
+  # conflict between two live processes kills the incumbent.
+  defp resolve_key_conflict(state, key, member, pid, value, other_pid, other_value) do
+    case {process_alive?(pid), process_alive?(other_pid)} do
+      {true, true} ->
+        unregister_local(state, key, other_pid)
+        Process.exit(other_pid, {:name_conflict, {key, other_value}, state.name, pid})
+        insert_key(state, key, member, pid, value)
+
+      {true, false} ->
+        insert_key(state, key, member, pid, value)
+
+      {false, _} ->
+        :ok
+    end
+  end
+
+  defp insert_key(state, key, member, pid, value) do
+    add_key_to_pids_table(state, pid, key)
+    :ets.insert(state.keys_ets_table, {key, member, {pid, value}})
   end
 
   defp process_diff(state, {:remove, {:key, key}}) do
@@ -274,6 +291,10 @@ defmodule Horde.RegistryImpl do
   end
 
   defp link_local_pid(_pid), do: nil
+
+  defp process_alive?(pid) do
+    Horde.ClusterTransport.Erlang.process_alive?(pid)
+  end
 
   def handle_call({:set_members, members}, _from, state) do
     new_members = MapSet.new(member_names(members))
